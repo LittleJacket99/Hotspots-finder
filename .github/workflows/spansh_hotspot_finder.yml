@@ -1,0 +1,30 @@
+name: Spansh Hotspot Finder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Query Spansh
+        run: python spansh_hotspot_finder.py systems.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: spansh-hotspot-results
+          path: |
+            spansh_results.csv
+            summary.json
