@@ -27,4 +27,5 @@ jobs:
           name: spansh-hotspot-results
           path: |
             spansh_results.csv
+            spansh_results_raw.csv
             summary.json
