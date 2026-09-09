@@ -1,0 +1,4 @@
+# One Elite Dangerous system per line
+Sol
+HIP 104349
+2MASS J12253414+2514288
