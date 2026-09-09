@@ -18,13 +18,14 @@ For rings with no hotspot signals, a row is still written with an empty material
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 
 import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
-USER_AGENT = "Hotspots-Spansh-Only/1.1"
+USER_AGENT = "Hotspots-Spansh-Only/1.2"
 
 SYSTEM_COLUMN_CANDIDATES = {
     "system",
@@ -81,6 +82,116 @@ def read_systems(path: Path):
             unique.append(system)
 
     return unique
+
+
+def deduplicate_systems(systems):
+    seen = set()
+    unique = []
+
+    for system in systems:
+        value = str(system).strip()
+
+        if not value:
+            continue
+
+        key = norm(value)
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(value)
+
+    return unique
+
+
+def fetch_systems_from_sheet(session, sheet_url, token, retries):
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.get(
+                sheet_url,
+                params={
+                    "action": "input",
+                    "token": token,
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("ok"):
+                raise RuntimeError(
+                    data.get("error", "Apps Script returned ok=false")
+                )
+
+            systems = deduplicate_systems(data.get("systems", []))
+
+            if not systems:
+                raise RuntimeError(
+                    "No systems found in Expansion strategy!F5:F"
+                )
+
+            return systems
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < retries:
+                wait = 2 ** attempt
+                print(
+                    f"Sheet input request failed ({attempt}/{retries}); "
+                    f"retry in {wait}s: {exc}"
+                )
+                time.sleep(wait)
+
+    raise last_error
+
+
+def post_results_to_sheet(
+    session,
+    sheet_url,
+    token,
+    clean_rows,
+    summary,
+    retries,
+):
+    payload = {
+        "token": token,
+        "rows": clean_rows,
+        "summary": summary,
+    }
+
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.post(
+                sheet_url,
+                json=payload,
+                timeout=90,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("ok"):
+                raise RuntimeError(
+                    data.get("error", "Apps Script returned ok=false")
+                )
+
+            return data
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < retries:
+                wait = 2 ** attempt
+                print(
+                    f"Sheet output request failed ({attempt}/{retries}); "
+                    f"retry in {wait}s: {exc}"
+                )
+                time.sleep(wait)
+
+    raise last_error
 
 
 def chunks(values, size):
@@ -339,7 +450,7 @@ def write_raw_csv(path: Path, rows):
         writer.writerows(rows)
 
 
-def write_clean_csv(path: Path, rows):
+def make_clean_rows(rows):
     """
     Human-readable version:
     - System appears only on the first row of that system block.
@@ -347,19 +458,6 @@ def write_clean_csv(path: Path, rows):
       of that ring block.
     - Material and Hotspot Count remain on every hotspot row.
     """
-    fields = [
-        "Input Order",
-        "System",
-        "Status",
-        "Body",
-        "Ring",
-        "Ring Type",
-        "Reserve Level",
-        "LS Distance",
-        "Material",
-        "Hotspot Count",
-    ]
-
     clean_rows = []
 
     previous_system = None
@@ -371,9 +469,12 @@ def write_clean_csv(path: Path, rows):
         current_system = row.get("System", "")
         current_ring = row.get("Ring", "")
         current_body = row.get("Body", "")
-        current_ring_key = (current_system, current_body, current_ring)
+        current_ring_key = (
+            current_system,
+            current_body,
+            current_ring,
+        )
 
-        # Blank repeated system name within the same system block.
         if current_system == previous_system:
             row["System"] = ""
             row["Input Order"] = ""
@@ -381,7 +482,6 @@ def write_clean_csv(path: Path, rows):
             previous_system = current_system
             previous_ring_key = None
 
-        # Blank repeated ring-level metadata within the same ring block.
         if current_ring and current_ring_key == previous_ring_key:
             row["Body"] = ""
             row["Ring"] = ""
@@ -394,6 +494,23 @@ def write_clean_csv(path: Path, rows):
                 previous_ring_key = current_ring_key
 
         clean_rows.append(row)
+
+    return clean_rows
+
+
+def write_clean_csv(path: Path, clean_rows):
+    fields = [
+        "Input Order",
+        "System",
+        "Status",
+        "Body",
+        "Ring",
+        "Ring Type",
+        "Reserve Level",
+        "LS Distance",
+        "Material",
+        "Hotspot Count",
+    ]
 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -467,7 +584,19 @@ def main():
 
     parser.add_argument(
         "input",
-        help="TXT or CSV containing system names",
+        nargs="?",
+        help="Optional TXT or CSV containing system names. "
+             "If SHEET_WEBAPP_URL is set, Google Sheets is used instead.",
+    )
+    parser.add_argument(
+        "--sheet-url",
+        default=os.getenv("SHEET_WEBAPP_URL", ""),
+        help="Apps Script Web App URL. Defaults to SHEET_WEBAPP_URL.",
+    )
+    parser.add_argument(
+        "--sheet-token",
+        default=os.getenv("SHEET_TOKEN", ""),
+        help="Shared token. Defaults to SHEET_TOKEN.",
     )
     parser.add_argument(
         "--out",
@@ -502,19 +631,11 @@ def main():
 
     args = parser.parse_args()
 
-    input_path = Path(args.input)
     output_path = Path(args.out)
     raw_output_path = output_path.with_name(
         output_path.stem + "_raw" + output_path.suffix
     )
     summary_path = Path(args.summary)
-
-    systems = read_systems(input_path)
-
-    if not systems:
-        raise SystemExit("No systems found in the input file.")
-
-    print(f"Systems loaded: {len(systems)}")
 
     session = requests.Session()
     session.headers.update({
@@ -522,6 +643,44 @@ def main():
         "Accept": "application/json",
         "Content-Type": "application/json",
     })
+
+    if args.sheet_url:
+        if not args.sheet_token:
+            raise SystemExit(
+                "SHEET_WEBAPP_URL is set but SHEET_TOKEN is missing."
+            )
+
+        print("Reading systems from Google Sheet...")
+
+        systems = fetch_systems_from_sheet(
+            session=session,
+            sheet_url=args.sheet_url,
+            token=args.sheet_token,
+            retries=args.retries,
+        )
+
+        input_source = "Google Sheet: Expansion strategy!F5:F"
+
+    elif args.input:
+        input_path = Path(args.input)
+
+        systems = deduplicate_systems(
+            read_systems(input_path)
+        )
+
+        input_source = str(input_path)
+
+    else:
+        raise SystemExit(
+            "No input source. Set SHEET_WEBAPP_URL/SHEET_TOKEN "
+            "or provide a TXT/CSV input file."
+        )
+
+    if not systems:
+        raise SystemExit("No systems found.")
+
+    print(f"Input source: {input_source}")
+    print(f"Systems loaded: {len(systems)}")
 
     bodies_by_system, unresolved = query_all_systems(
         session=session,
@@ -538,8 +697,10 @@ def main():
         unresolved=unresolved,
     )
 
+    clean_rows = make_clean_rows(rows)
+
     write_raw_csv(raw_output_path, rows)
-    write_clean_csv(output_path, rows)
+    write_clean_csv(output_path, clean_rows)
 
     summary = build_summary(
         systems=systems,
@@ -551,6 +712,25 @@ def main():
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    if args.sheet_url:
+        print()
+        print("Writing results to Google Sheet...")
+
+        result = post_results_to_sheet(
+            session=session,
+            sheet_url=args.sheet_url,
+            token=args.sheet_token,
+            clean_rows=clean_rows,
+            summary=summary,
+            retries=args.retries,
+        )
+
+        print(
+            f"Sheet updated: "
+            f"{result.get('rows_written', 0)} data rows "
+            f"written to Expansion strategy!L5:T"
+        )
 
     print()
     print(json.dumps(summary, indent=2, ensure_ascii=False))
