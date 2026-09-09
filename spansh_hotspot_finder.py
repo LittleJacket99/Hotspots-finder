@@ -24,7 +24,7 @@ from pathlib import Path
 import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
-USER_AGENT = "Hotspots-Spansh-Only/1.0"
+USER_AGENT = "Hotspots-Spansh-Only/1.1"
 
 SYSTEM_COLUMN_CANDIDATES = {
     "system",
@@ -319,7 +319,7 @@ def make_output_rows(systems, bodies_by_system, unresolved):
     return rows
 
 
-def write_csv(path: Path, rows):
+def write_raw_csv(path: Path, rows):
     fields = [
         "Input Order",
         "System",
@@ -337,6 +337,68 @@ def write_csv(path: Path, rows):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_clean_csv(path: Path, rows):
+    """
+    Human-readable version:
+    - System appears only on the first row of that system block.
+    - Body/Ring/Ring Type/Reserve/LS appear only on the first row
+      of that ring block.
+    - Material and Hotspot Count remain on every hotspot row.
+    """
+    fields = [
+        "Input Order",
+        "System",
+        "Status",
+        "Body",
+        "Ring",
+        "Ring Type",
+        "Reserve Level",
+        "LS Distance",
+        "Material",
+        "Hotspot Count",
+    ]
+
+    clean_rows = []
+
+    previous_system = None
+    previous_ring_key = None
+
+    for original in rows:
+        row = dict(original)
+
+        current_system = row.get("System", "")
+        current_ring = row.get("Ring", "")
+        current_body = row.get("Body", "")
+        current_ring_key = (current_system, current_body, current_ring)
+
+        # Blank repeated system name within the same system block.
+        if current_system == previous_system:
+            row["System"] = ""
+            row["Input Order"] = ""
+        else:
+            previous_system = current_system
+            previous_ring_key = None
+
+        # Blank repeated ring-level metadata within the same ring block.
+        if current_ring and current_ring_key == previous_ring_key:
+            row["Body"] = ""
+            row["Ring"] = ""
+            row["Ring Type"] = ""
+            row["Reserve Level"] = ""
+            row["LS Distance"] = ""
+            row["Status"] = ""
+        else:
+            if current_ring:
+                previous_ring_key = current_ring_key
+
+        clean_rows.append(row)
+
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(clean_rows)
 
 
 def build_summary(systems, rows, unresolved):
@@ -410,7 +472,7 @@ def main():
     parser.add_argument(
         "--out",
         default="spansh_results.csv",
-        help="Output CSV path",
+        help="Human-readable output CSV path",
     )
     parser.add_argument(
         "--summary",
@@ -442,6 +504,9 @@ def main():
 
     input_path = Path(args.input)
     output_path = Path(args.out)
+    raw_output_path = output_path.with_name(
+        output_path.stem + "_raw" + output_path.suffix
+    )
     summary_path = Path(args.summary)
 
     systems = read_systems(input_path)
@@ -473,7 +538,8 @@ def main():
         unresolved=unresolved,
     )
 
-    write_csv(output_path, rows)
+    write_raw_csv(raw_output_path, rows)
+    write_clean_csv(output_path, rows)
 
     summary = build_summary(
         systems=systems,
@@ -489,7 +555,8 @@ def main():
     print()
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     print()
-    print(f"Results: {output_path.resolve()}")
+    print(f"Clean results: {output_path.resolve()}")
+    print(f"Raw results: {raw_output_path.resolve()}")
     print(f"Summary: {summary_path.resolve()}")
 
 
