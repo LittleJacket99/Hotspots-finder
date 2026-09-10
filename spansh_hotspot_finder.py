@@ -11,7 +11,7 @@ import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
 SPANSH_SYSTEMS_URL = "https://spansh.co.uk/api/systems/search"
-USER_AGENT = "Hotspots-Finder/2.7"
+USER_AGENT = "Hotspots-Finder/2.8"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -156,10 +156,51 @@ def get_sheet_input():
         or ""
     ).strip()
 
-    if not systems and not faction_name:
+    power_name = str(
+        data.get("power_name", "")
+        or ""
+    ).strip()
+
+    power_states_data = (
+        data.get("power_states", {})
+        or {}
+    )
+
+    power_states = {
+        "Unoccupied": bool(
+            power_states_data.get(
+                "unoccupied",
+                False,
+            )
+        ),
+        "Exploited": bool(
+            power_states_data.get(
+                "exploited",
+                False,
+            )
+        ),
+        "Fortified": bool(
+            power_states_data.get(
+                "fortified",
+                False,
+            )
+        ),
+        "Stronghold": bool(
+            power_states_data.get(
+                "stronghold",
+                False,
+            )
+        ),
+    }
+
+    if (
+        not systems
+        and not faction_name
+        and not power_name
+    ):
         raise RuntimeError(
-            "No systems found in Hotspots Finder!C2:C "
-            "and Faction name is empty."
+            "No systems found in Hotspots Finder!C2:C, "
+            "Faction name is empty and Power is empty."
         )
 
     if not hotspots_enabled and not planets_enabled:
@@ -176,38 +217,123 @@ def get_sheet_input():
         "only_pristine": only_pristine,
         "only_landables": only_landables,
         "faction_name": faction_name,
+        "power_name": power_name,
+        "power_states": power_states,
     }
 
 
 # ============================================================
-# SPANSH SYSTEM SEARCH - CONTROLLING FACTION
+# SPANSH SYSTEM SEARCH - FACTION / POWER / POWER STATE
 # ============================================================
 
-def search_systems_by_controlling_faction(faction_name):
+def value_matches_exact(value, expected):
     """
-    Return every Spansh system whose controlling_minor_faction
-    exactly matches faction_name.
+    Defensive exact-match helper.
+    Spansh fields are normally strings, but this also supports
+    list-like values for compatibility with older data.
     """
-    faction_name = str(faction_name or "").strip()
+    expected_key = norm(expected)
 
-    if not faction_name:
+    if isinstance(value, (list, tuple, set)):
+        return any(
+            norm(item) == expected_key
+            for item in value
+        )
+
+    return norm(value) == expected_key
+
+
+def search_systems_by_filters(
+    faction_name,
+    power_name,
+    selected_power_states,
+):
+    """
+    Search Spansh systems using any combination of:
+      - controlling_minor_faction
+      - system_power
+      - system_power_state
+
+    Power State is applied only when Power is set.
+    """
+    faction_name = str(
+        faction_name or ""
+    ).strip()
+
+    power_name = str(
+        power_name or ""
+    ).strip()
+
+    selected_power_states = [
+        str(state).strip()
+        for state in selected_power_states
+        if str(state).strip()
+    ]
+
+    filters = {}
+
+    if faction_name:
+        filters[
+            "controlling_minor_faction"
+        ] = {
+            "value": [faction_name]
+        }
+
+    if power_name:
+        filters[
+            "system_power"
+        ] = {
+            "value": [power_name]
+        }
+
+        if selected_power_states:
+            filters[
+                "system_power_state"
+            ] = {
+                "value":
+                    selected_power_states
+            }
+
+    if not filters:
         return []
 
     print(
-        f'Searching Spansh systems controlled by: "{faction_name}"'
+        "Searching Spansh systems with filters:"
     )
+
+    if faction_name:
+        print(
+            f'  Controlling faction: "{faction_name}"'
+        )
+
+    if power_name:
+        print(
+            f'  Power: "{power_name}"'
+        )
+
+        print(
+            "  Power states: "
+            + (
+                ", ".join(
+                    selected_power_states
+                )
+                if selected_power_states
+                else "ALL"
+            )
+        )
 
     systems = []
     seen = set()
     page = 0
 
+    selected_state_keys = {
+        norm(state)
+        for state in selected_power_states
+    }
+
     while True:
         payload = {
-            "filters": {
-                "controlling_minor_faction": {
-                    "value": [faction_name]
-                }
-            },
+            "filters": filters,
             "size": PAGE_SIZE,
             "page": page,
         }
@@ -218,8 +344,10 @@ def search_systems_by_controlling_faction(faction_name):
             json=payload,
             headers={
                 "User-Agent": USER_AGENT,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
+                "Accept":
+                    "application/json",
+                "Content-Type":
+                    "application/json",
             },
         )
 
@@ -236,17 +364,48 @@ def search_systems_by_controlling_faction(faction_name):
         )
 
         for item in results:
-            controlling = str(
-                item.get(
+
+            # --------------------------------------------
+            # Extra local exact-match validation
+            # --------------------------------------------
+
+            if faction_name:
+                controlling = item.get(
                     "controlling_minor_faction",
                     "",
                 )
-                or ""
-            ).strip()
 
-            # Extra safety: accept only exact faction matches.
-            if norm(controlling) != norm(faction_name):
-                continue
+                if not value_matches_exact(
+                    controlling,
+                    faction_name,
+                ):
+                    continue
+
+            if power_name:
+                system_power = item.get(
+                    "system_power",
+                    "",
+                )
+
+                if not value_matches_exact(
+                    system_power,
+                    power_name,
+                ):
+                    continue
+
+                if selected_state_keys:
+                    system_power_state = norm(
+                        item.get(
+                            "system_power_state",
+                            "",
+                        )
+                    )
+
+                    if (
+                        system_power_state
+                        not in selected_state_keys
+                    ):
+                        continue
 
             system_name = str(
                 item.get("name")
@@ -261,34 +420,29 @@ def search_systems_by_controlling_faction(faction_name):
 
             if key not in seen:
                 seen.add(key)
-                systems.append(system_name)
+                systems.append(
+                    system_name
+                )
 
         if (
             not results
             or
-            (page + 1) * PAGE_SIZE >= total
+            (page + 1) * PAGE_SIZE
+            >= total
         ):
             break
 
         page += 1
         time.sleep(DELAY)
 
-    if not systems:
-        print(
-            f'FACTION_NOT_FOUND: no systems found on Spansh '
-            f'with controlling faction "{faction_name}".'
-        )
-        print(
-            "Existing manual system list in C2:C was not changed."
-        )
-        return []
-
     systems.sort(
-        key=lambda value: value.casefold()
+        key=lambda value:
+            value.casefold()
     )
 
     print(
-        f"Controlled systems found: {len(systems)}"
+        f"Systems matching filters: "
+        f"{len(systems)}"
     )
 
     return systems
@@ -296,15 +450,17 @@ def search_systems_by_controlling_faction(faction_name):
 
 def write_systems_to_sheet(systems):
     """
-    Replace Hotspots Finder!C2:C only after a faction search
-    has returned at least one valid system.
+    Replace Hotspots Finder!C2:C only after a Spansh system
+    search has returned at least one valid system.
     """
     response = request_with_retries(
         "POST",
         SHEET_URL,
         json={
-            "action": "hotspots_systems_write",
-            "systems": systems,
+            "action":
+                "hotspots_systems_write",
+            "systems":
+                systems,
         },
     )
 
@@ -1207,10 +1363,27 @@ def build_summary(
         "faction_name":
             config.get("faction_name", ""),
 
+        "power_name":
+            config.get("power_name", ""),
+
+        "power_state_filters":
+            [
+                state
+                for state, enabled
+                in config.get(
+                    "power_states",
+                    {},
+                ).items()
+                if enabled
+            ],
+
         "system_source":
             (
-                "controlling_faction"
-                if config.get("faction_name")
+                "spansh_system_filters"
+                if (
+                    config.get("faction_name")
+                    or config.get("power_name")
+                )
                 else "manual_list"
             ),
 
@@ -1237,18 +1410,38 @@ def build_summary(
     }
 
 
-def handle_faction_not_found(faction_name, config):
+def handle_no_systems_matching_filters(
+    faction_name,
+    power_name,
+    selected_power_states,
+    config,
+):
     """
-    Graceful non-error outcome for an unknown/invalid faction name.
+    Graceful non-error outcome when Spansh returns no systems.
 
     - Does NOT touch C2:C.
-    - Replaces the old result area with a clear status message.
-    - Writes summary.json.
+    - Replaces old results with a clear status.
     - Ends the workflow successfully.
     """
+    states_text = (
+        ", ".join(selected_power_states)
+        if selected_power_states
+        else ""
+    )
+
     sheet_values = [
-        ["Status", "Faction"],
-        ["FACTION_NOT_FOUND", faction_name],
+        [
+            "Status",
+            "Faction",
+            "Power",
+            "Power States",
+        ],
+        [
+            "NO_SYSTEMS_MATCHING_FILTERS",
+            faction_name,
+            power_name,
+            states_text,
+        ],
     ]
 
     write_matrix_csv(
@@ -1257,13 +1450,24 @@ def handle_faction_not_found(faction_name, config):
     )
 
     summary = {
-        "status": "FACTION_NOT_FOUND",
-        "faction_name": faction_name,
-        "system_source": "controlling_faction",
-        "systems_found": 0,
-        "manual_system_list_preserved": True,
-        "hotspots_enabled": config["hotspots_enabled"],
-        "planets_enabled": config["planets_enabled"],
+        "status":
+            "NO_SYSTEMS_MATCHING_FILTERS",
+        "faction_name":
+            faction_name,
+        "power_name":
+            power_name,
+        "power_state_filters":
+            selected_power_states,
+        "system_source":
+            "spansh_system_filters",
+        "systems_found":
+            0,
+        "manual_system_list_preserved":
+            True,
+        "hotspots_enabled":
+            config["hotspots_enabled"],
+        "planets_enabled":
+            config["planets_enabled"],
     }
 
     Path(
@@ -1288,7 +1492,8 @@ def handle_faction_not_found(faction_name, config):
 
     print()
     print(
-        "Writing FACTION_NOT_FOUND to Google Sheet..."
+        "Writing NO_SYSTEMS_MATCHING_FILTERS "
+        "to Google Sheet..."
     )
 
     result = write_sheet(
@@ -1297,7 +1502,8 @@ def handle_faction_not_found(faction_name, config):
 
     print(
         "Sheet updated: "
-        f"{result.get('rows', 0)} data rows."
+        f"{result.get('rows', 0)} "
+        "data rows."
     )
 
 
@@ -1313,14 +1519,43 @@ def main():
         "",
     ).strip()
 
-    if faction_name:
-        systems = search_systems_by_controlling_faction(
-            faction_name
+    power_name = config.get(
+        "power_name",
+        "",
+    ).strip()
+
+    selected_power_states = [
+        state
+        for state, enabled
+        in config.get(
+            "power_states",
+            {},
+        ).items()
+        if enabled
+    ]
+
+    # Power State checkboxes are intentionally ignored
+    # when Power itself is empty.
+    effective_power_states = (
+        selected_power_states
+        if power_name
+        else []
+    )
+
+    if faction_name or power_name:
+        systems = (
+            search_systems_by_filters(
+                faction_name,
+                power_name,
+                effective_power_states,
+            )
         )
 
         if not systems:
-            handle_faction_not_found(
+            handle_no_systems_matching_filters(
                 faction_name,
+                power_name,
+                effective_power_states,
                 config,
             )
             return
@@ -1334,14 +1569,15 @@ def main():
 
         print(
             "System list in Google Sheet updated "
-            "from controlling faction."
+            "from Spansh system filters."
         )
 
     else:
         systems = config["systems"]
 
         print(
-            "Faction name empty: using manual system list."
+            "Faction name and Power empty: "
+            "using manual system list."
         )
 
     print(
@@ -1356,6 +1592,33 @@ def main():
     print(
         f"Planets: "
         f"{config['planets_enabled']}"
+    )
+
+    print(
+        "Faction filter: "
+        + (
+            faction_name
+            or "NONE"
+        )
+    )
+
+    print(
+        "Power filter: "
+        + (
+            power_name
+            or "NONE"
+        )
+    )
+
+    print(
+        "Power State filters: "
+        + (
+            ", ".join(
+                effective_power_states
+            )
+            if effective_power_states
+            else "ALL / IGNORED"
+        )
     )
 
     print(
