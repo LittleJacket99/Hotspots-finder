@@ -11,7 +11,7 @@ import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
 SPANSH_SYSTEMS_URL = "https://spansh.co.uk/api/systems/search"
-USER_AGENT = "Hotspots-Finder/2.9"
+USER_AGENT = "Hotspots-Finder/3.0"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -246,8 +246,8 @@ def search_systems_by_filters(
     """
     Search Spansh systems using any combination of:
       - controlling_minor_faction
-      - system_power
-      - system_power_state
+      - power
+      - power_state
 
     Power State is applied only when Power is set.
     """
@@ -276,14 +276,14 @@ def search_systems_by_filters(
 
     if power_name:
         filters[
-            "system_power"
+            "power"
         ] = {
             "value": [power_name]
         }
 
         if selected_power_states:
             filters[
-                "system_power_state"
+                "power_state"
             ] = {
                 "value":
                     selected_power_states
@@ -378,8 +378,8 @@ def search_systems_by_filters(
 
             if power_name:
                 system_power = item.get(
-                    "system_power",
-                    "",
+                    "power",
+                    [],
                 )
 
                 if not value_matches_exact(
@@ -391,7 +391,7 @@ def search_systems_by_filters(
                 if selected_state_keys:
                     system_power_state = norm(
                         item.get(
-                            "system_power_state",
+                            "power_state",
                             "",
                         )
                     )
