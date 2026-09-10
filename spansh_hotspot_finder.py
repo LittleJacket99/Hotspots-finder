@@ -401,7 +401,7 @@ def build_hotspot_rows(
                 if not signals:
                     raw_rows.append({
                         "System": system,
-                        "Status": "RING_NO_HOTSPOTS",
+                        "Status": "NO_HOTSPOT / NOT SCANNED",
                         "Body": body_name,
                         "Ring": ring_name,
                         "Ring Type": ring_type,
@@ -447,7 +447,7 @@ def build_hotspot_rows(
                 if not valid_signal:
                     raw_rows.append({
                         "System": system,
-                        "Status": "RING_NO_HOTSPOTS",
+                        "Status": "NO_HOTSPOT / NOT SCANNED",
                         "Body": body_name,
                         "Ring": ring_name,
                         "Ring Type": ring_type,
