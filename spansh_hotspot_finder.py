@@ -11,7 +11,7 @@ import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
 SPANSH_SYSTEMS_URL = "https://spansh.co.uk/api/systems/search"
-USER_AGENT = "Hotspots-Finder/3.0"
+USER_AGENT = "Hotspots-Finder/3.1"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -86,6 +86,38 @@ def request_with_retries(method, url, **kwargs):
                 time.sleep(wait)
 
     raise last_error
+
+
+# ============================================================
+# GOOGLE SHEET STATUS
+# ============================================================
+
+def update_finder_status(status):
+    """
+    Update Hotspots Finder!D5 without touching any other cells.
+    Statuses: READY / RUNNING / COMPLETED / ERROR
+    """
+    if not SHEET_URL:
+        return
+
+    response = request_with_retries(
+        "POST",
+        SHEET_URL,
+        json={
+            "action": "hotspots_status",
+            "status": status,
+        },
+    )
+
+    data = response.json()
+
+    if data.get("status") != "ok":
+        raise RuntimeError(
+            data.get(
+                "message",
+                "Apps Script status update error",
+            )
+        )
 
 
 # ============================================================
@@ -1959,4 +1991,26 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        update_finder_status(
+            "RUNNING"
+        )
+
+        main()
+
+        update_finder_status(
+            "COMPLETED"
+        )
+
+    except Exception:
+        try:
+            update_finder_status(
+                "ERROR"
+            )
+        except Exception as status_error:
+            print(
+                "Could not update Sheet status to ERROR: "
+                f"{status_error}"
+            )
+
+        raise
