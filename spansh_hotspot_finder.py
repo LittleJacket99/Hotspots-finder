@@ -10,7 +10,8 @@ import requests
 
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
-USER_AGENT = "Hotspots-Finder/2.5"
+SPANSH_SYSTEMS_URL = "https://spansh.co.uk/api/systems/search"
+USER_AGENT = "Hotspots-Finder/2.7"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -150,9 +151,15 @@ def get_sheet_input():
         filters.get("only_landables", False)
     )
 
-    if not systems:
+    faction_name = str(
+        data.get("faction_name", "")
+        or ""
+    ).strip()
+
+    if not systems and not faction_name:
         raise RuntimeError(
-            "No systems found in Hotspots Finder!C2:C"
+            "No systems found in Hotspots Finder!C2:C "
+            "and Faction name is empty."
         )
 
     if not hotspots_enabled and not planets_enabled:
@@ -168,7 +175,150 @@ def get_sheet_input():
         "materials": materials,
         "only_pristine": only_pristine,
         "only_landables": only_landables,
+        "faction_name": faction_name,
     }
+
+
+# ============================================================
+# SPANSH SYSTEM SEARCH - CONTROLLING FACTION
+# ============================================================
+
+def search_systems_by_controlling_faction(faction_name):
+    """
+    Return every Spansh system whose controlling_minor_faction
+    exactly matches faction_name.
+    """
+    faction_name = str(faction_name or "").strip()
+
+    if not faction_name:
+        return []
+
+    print(
+        f'Searching Spansh systems controlled by: "{faction_name}"'
+    )
+
+    systems = []
+    seen = set()
+    page = 0
+
+    while True:
+        payload = {
+            "filters": {
+                "controlling_minor_faction": {
+                    "value": [faction_name]
+                }
+            },
+            "size": PAGE_SIZE,
+            "page": page,
+        }
+
+        response = request_with_retries(
+            "POST",
+            SPANSH_SYSTEMS_URL,
+            json=payload,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        data = response.json()
+
+        results = (
+            data.get("results", [])
+            or []
+        )
+
+        total = int(
+            data.get("count", 0)
+            or 0
+        )
+
+        for item in results:
+            controlling = str(
+                item.get(
+                    "controlling_minor_faction",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            # Extra safety: accept only exact faction matches.
+            if norm(controlling) != norm(faction_name):
+                continue
+
+            system_name = str(
+                item.get("name")
+                or item.get("system_name")
+                or ""
+            ).strip()
+
+            if not system_name:
+                continue
+
+            key = norm(system_name)
+
+            if key not in seen:
+                seen.add(key)
+                systems.append(system_name)
+
+        if (
+            not results
+            or
+            (page + 1) * PAGE_SIZE >= total
+        ):
+            break
+
+        page += 1
+        time.sleep(DELAY)
+
+    if not systems:
+        print(
+            f'FACTION_NOT_FOUND: no systems found on Spansh '
+            f'with controlling faction "{faction_name}".'
+        )
+        print(
+            "Existing manual system list in C2:C was not changed."
+        )
+        return []
+
+    systems.sort(
+        key=lambda value: value.casefold()
+    )
+
+    print(
+        f"Controlled systems found: {len(systems)}"
+    )
+
+    return systems
+
+
+def write_systems_to_sheet(systems):
+    """
+    Replace Hotspots Finder!C2:C only after a faction search
+    has returned at least one valid system.
+    """
+    response = request_with_retries(
+        "POST",
+        SHEET_URL,
+        json={
+            "action": "hotspots_systems_write",
+            "systems": systems,
+        },
+    )
+
+    data = response.json()
+
+    if data.get("status") != "ok":
+        raise RuntimeError(
+            data.get(
+                "message",
+                "Apps Script systems write error",
+            )
+        )
+
+    return data
 
 
 # ============================================================
@@ -1054,6 +1204,16 @@ def build_summary(
         "only_landables":
             config["only_landables"],
 
+        "faction_name":
+            config.get("faction_name", ""),
+
+        "system_source":
+            (
+                "controlling_faction"
+                if config.get("faction_name")
+                else "manual_list"
+            ),
+
         "hotspot_material_records_after_filters":
             len(hotspot_records)
             if config["hotspots_enabled"]
@@ -1077,6 +1237,70 @@ def build_summary(
     }
 
 
+def handle_faction_not_found(faction_name, config):
+    """
+    Graceful non-error outcome for an unknown/invalid faction name.
+
+    - Does NOT touch C2:C.
+    - Replaces the old result area with a clear status message.
+    - Writes summary.json.
+    - Ends the workflow successfully.
+    """
+    sheet_values = [
+        ["Status", "Faction"],
+        ["FACTION_NOT_FOUND", faction_name],
+    ]
+
+    write_matrix_csv(
+        "spansh_results.csv",
+        sheet_values,
+    )
+
+    summary = {
+        "status": "FACTION_NOT_FOUND",
+        "faction_name": faction_name,
+        "system_source": "controlling_faction",
+        "systems_found": 0,
+        "manual_system_list_preserved": True,
+        "hotspots_enabled": config["hotspots_enabled"],
+        "planets_enabled": config["planets_enabled"],
+    }
+
+    Path(
+        "summary.json"
+    ).write_text(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    print()
+    print(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+    print()
+    print(
+        "Writing FACTION_NOT_FOUND to Google Sheet..."
+    )
+
+    result = write_sheet(
+        sheet_values
+    )
+
+    print(
+        "Sheet updated: "
+        f"{result.get('rows', 0)} data rows."
+    )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -1084,7 +1308,41 @@ def build_summary(
 def main():
     config = get_sheet_input()
 
-    systems = config["systems"]
+    faction_name = config.get(
+        "faction_name",
+        "",
+    ).strip()
+
+    if faction_name:
+        systems = search_systems_by_controlling_faction(
+            faction_name
+        )
+
+        if not systems:
+            handle_faction_not_found(
+                faction_name,
+                config,
+            )
+            return
+
+        # Only overwrite C2:C after Spansh returned a valid list.
+        write_systems_to_sheet(
+            systems
+        )
+
+        config["systems"] = systems
+
+        print(
+            "System list in Google Sheet updated "
+            "from controlling faction."
+        )
+
+    else:
+        systems = config["systems"]
+
+        print(
+            "Faction name empty: using manual system list."
+        )
 
     print(
         f"Systems loaded: {len(systems)}"
