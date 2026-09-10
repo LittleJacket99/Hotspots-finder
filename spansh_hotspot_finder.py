@@ -527,6 +527,7 @@ PLANET_HEADERS = [
     "Status",
     "Body",
     "Planet Type",
+    "Landable",
     "LS Distance",
 ]
 
@@ -552,6 +553,7 @@ def build_planet_rows(
                 "Status": "UNKNOWN_API_ERROR",
                 "Body": "",
                 "Planet Type": "",
+                "Landable": "",
                 "LS Distance": "",
             })
             continue
@@ -567,6 +569,7 @@ def build_planet_rows(
                 "Status": "SYSTEM_NOT_FOUND",
                 "Body": "",
                 "Planet Type": "",
+                "Landable": "",
                 "LS Distance": "",
             })
             continue
@@ -580,6 +583,18 @@ def build_planet_rows(
 
             if body_type != "planet":
                 continue
+
+            landable_value = body.get(
+                "landable",
+                None,
+            )
+
+            if landable_value is True:
+                landable = "Yes"
+            elif landable_value is False:
+                landable = "No"
+            else:
+                landable = ""
 
             planets.append({
                 "System": system,
@@ -598,6 +613,7 @@ def build_planet_rows(
                     )
                     or ""
                 ).strip(),
+                "Landable": landable,
                 "LS Distance":
                     body.get(
                         "distance_to_arrival",
@@ -614,6 +630,7 @@ def build_planet_rows(
                 "Status": "NO_PLANETS",
                 "Body": "",
                 "Planet Type": "",
+                "Landable": "",
                 "LS Distance": "",
             })
 
