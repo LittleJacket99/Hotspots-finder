@@ -2,6 +2,11 @@ name: Spansh Hotspot Finder
 
 on:
   workflow_dispatch:
+    inputs:
+      sheet_webapp_url:
+        description: "Google Apps Script Web App URL"
+        required: false
+        type: string
 
 jobs:
   search:
@@ -22,7 +27,7 @@ jobs:
 
       - name: Query Spansh and update Google Sheet
         env:
-          SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
+          SHEET_WEBAPP_URL: ${{ inputs.sheet_webapp_url || secrets.SHEET_WEBAPP_URL }}
         run: python spansh_hotspot_finder.py
 
       - name: Upload result files
