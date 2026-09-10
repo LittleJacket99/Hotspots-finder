@@ -10,7 +10,7 @@ import requests
 
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
-USER_AGENT = "Hotspots-Finder/2.4"
+USER_AGENT = "Hotspots-Finder/2.5"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -713,9 +713,14 @@ def build_planet_rows(
             if body_type != "planet":
                 continue
 
+            # Spansh Body Search uses "is_landable".
+            # Keep "landable" as a fallback for compatibility.
             landable_value = body.get(
-                "landable",
-                None,
+                "is_landable",
+                body.get(
+                    "landable",
+                    None,
+                ),
             )
 
             if landable_value is True:
