@@ -11,7 +11,7 @@ import requests
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
 SPANSH_SYSTEMS_URL = "https://spansh.co.uk/api/systems/search"
-USER_AGENT = "Hotspots-Finder/2.8"
+USER_AGENT = "Hotspots-Finder/2.9"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -201,11 +201,6 @@ def get_sheet_input():
         raise RuntimeError(
             "No systems found in Hotspots Finder!C2:C, "
             "Faction name is empty and Power is empty."
-        )
-
-    if not hotspots_enabled and not planets_enabled:
-        raise RuntimeError(
-            "Both Hotspots and Planets checkboxes are disabled."
         )
 
     return {
@@ -1507,6 +1502,166 @@ def handle_no_systems_matching_filters(
     )
 
 
+def handle_system_list_only(
+    systems,
+    faction_name,
+    power_name,
+    selected_power_states,
+):
+    """
+    Hotspots OFF + Planets OFF:
+    only update/report the system list.
+    """
+    states_text = (
+        ", ".join(selected_power_states)
+        if selected_power_states
+        else "ALL"
+    )
+
+    sheet_values = [
+        [
+            "Status",
+            "Systems",
+            "Faction",
+            "Power",
+            "Power States",
+        ],
+        [
+            "SYSTEM_LIST_UPDATED",
+            len(systems),
+            faction_name,
+            power_name,
+            (
+                states_text
+                if power_name
+                else ""
+            ),
+        ],
+    ]
+
+    write_matrix_csv(
+        "spansh_results.csv",
+        sheet_values,
+    )
+
+    summary = {
+        "status":
+            "SYSTEM_LIST_UPDATED",
+        "systems_found":
+            len(systems),
+        "faction_name":
+            faction_name,
+        "power_name":
+            power_name,
+        "power_state_filters":
+            (
+                selected_power_states
+                if power_name
+                else []
+            ),
+        "hotspots_enabled":
+            False,
+        "planets_enabled":
+            False,
+    }
+
+    Path(
+        "summary.json"
+    ).write_text(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    print()
+    print(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+    print()
+    print(
+        "Writing system-list-only status "
+        "to Google Sheet..."
+    )
+
+    write_sheet(
+        sheet_values
+    )
+
+
+def handle_no_action_selected():
+    """
+    No Hotspots, no Planets, no Faction and no Power:
+    preserve the current system list and show a friendly status.
+    """
+    sheet_values = [
+        [
+            "Status",
+            "Message",
+        ],
+        [
+            "NO_ACTION_SELECTED",
+            (
+                "Enable Hotspots or Planets, "
+                "or enter a Faction name or Power."
+            ),
+        ],
+    ]
+
+    write_matrix_csv(
+        "spansh_results.csv",
+        sheet_values,
+    )
+
+    summary = {
+        "status":
+            "NO_ACTION_SELECTED",
+        "hotspots_enabled":
+            False,
+        "planets_enabled":
+            False,
+        "manual_system_list_preserved":
+            True,
+    }
+
+    Path(
+        "summary.json"
+    ).write_text(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    print()
+    print(
+        json.dumps(
+            summary,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+    print()
+    print(
+        "Writing NO_ACTION_SELECTED "
+        "to Google Sheet..."
+    )
+
+    write_sheet(
+        sheet_values
+    )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -1572,6 +1727,20 @@ def main():
             "from Spansh system filters."
         )
 
+        # If both result modes are disabled, stop here:
+        # the requested job was only to populate the system list.
+        if (
+            not config["hotspots_enabled"]
+            and not config["planets_enabled"]
+        ):
+            handle_system_list_only(
+                systems,
+                faction_name,
+                power_name,
+                effective_power_states,
+            )
+            return
+
     else:
         systems = config["systems"]
 
@@ -1579,6 +1748,14 @@ def main():
             "Faction name and Power empty: "
             "using manual system list."
         )
+
+        # Nothing at all selected: do not query Spansh bodies.
+        if (
+            not config["hotspots_enabled"]
+            and not config["planets_enabled"]
+        ):
+            handle_no_action_selected()
+            return
 
     print(
         f"Systems loaded: {len(systems)}"
