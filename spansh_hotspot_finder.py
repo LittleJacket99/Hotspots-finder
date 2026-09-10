@@ -10,7 +10,7 @@ import requests
 
 
 SPANSH_URL = "https://spansh.co.uk/api/bodies/search"
-USER_AGENT = "Hotspots-Finder/2.0"
+USER_AGENT = "Hotspots-Finder/2.4"
 
 SHEET_URL = os.getenv("SHEET_WEBAPP_URL", "").strip()
 
@@ -26,6 +26,10 @@ RETRIES = 3
 
 def norm(value):
     return " ".join(str(value or "").strip().lower().split())
+
+
+def norm_filter(value):
+    return norm(value).replace("-", " ")
 
 
 def deduplicate(values):
@@ -72,10 +76,12 @@ def request_with_retries(method, url, **kwargs):
 
             if attempt < RETRIES:
                 wait = 2 ** attempt
+
                 print(
                     f"Request failed ({attempt}/{RETRIES}); "
                     f"retry in {wait}s: {exc}"
                 )
+
                 time.sleep(wait)
 
     raise last_error
@@ -103,7 +109,10 @@ def get_sheet_input():
 
     if data.get("status") != "ok":
         raise RuntimeError(
-            data.get("message", "Apps Script input error")
+            data.get(
+                "message",
+                "Apps Script input error",
+            )
         )
 
     systems = deduplicate(
@@ -118,9 +127,32 @@ def get_sheet_input():
         data.get("planets", False)
     )
 
+    filters = data.get("filters", {}) or {}
+
+    ring_types = {
+        "icy": bool(filters.get("icy", False)),
+        "metallic": bool(filters.get("metallic", False)),
+        "metal rich": bool(filters.get("metal_rich", False)),
+        "rocky": bool(filters.get("rocky", False)),
+    }
+
+    materials = {
+        "platinum": bool(filters.get("platinum", False)),
+        "bromellite": bool(filters.get("bromellite", False)),
+        "monazite": bool(filters.get("monazite", False)),
+    }
+
+    only_pristine = bool(
+        filters.get("only_pristine", False)
+    )
+
+    only_landables = bool(
+        filters.get("only_landables", False)
+    )
+
     if not systems:
         raise RuntimeError(
-            "No systems found in Hotspots Finder!B2:B"
+            "No systems found in Hotspots Finder!C2:C"
         )
 
     if not hotspots_enabled and not planets_enabled:
@@ -128,21 +160,22 @@ def get_sheet_input():
             "Both Hotspots and Planets checkboxes are disabled."
         )
 
-    return (
-        systems,
-        hotspots_enabled,
-        planets_enabled,
-    )
+    return {
+        "systems": systems,
+        "hotspots_enabled": hotspots_enabled,
+        "planets_enabled": planets_enabled,
+        "ring_types": ring_types,
+        "materials": materials,
+        "only_pristine": only_pristine,
+        "only_landables": only_landables,
+    }
 
 
 # ============================================================
 # SPANSH
 # ============================================================
 
-def request_spansh_page(
-    systems,
-    page,
-):
+def request_spansh_page(systems, page):
     payload = {
         "filters": {
             "system_name": {
@@ -189,10 +222,7 @@ def fetch_batch(systems):
 
         for body in bodies:
             system_name = str(
-                body.get(
-                    "system_name",
-                    ""
-                )
+                body.get("system_name", "")
                 or ""
             ).strip()
 
@@ -207,8 +237,7 @@ def fetch_batch(systems):
         if (
             not bodies
             or
-            (page + 1) * PAGE_SIZE
-            >= total
+            (page + 1) * PAGE_SIZE >= total
         ):
             break
 
@@ -244,7 +273,7 @@ def query_all_systems(systems):
             for key, bodies in result.items():
                 all_bodies.setdefault(
                     key,
-                    []
+                    [],
                 ).extend(bodies)
 
         except Exception as exc:
@@ -267,7 +296,7 @@ def query_all_systems(systems):
                     for key, bodies in result.items():
                         all_bodies.setdefault(
                             key,
-                            []
+                            [],
                         ).extend(bodies)
 
                 except Exception as single_exc:
@@ -306,6 +335,20 @@ HOTSPOT_HEADERS = [
 ]
 
 
+def empty_hotspot_status(system, status):
+    return {
+        "System": system,
+        "Status": status,
+        "Body": "",
+        "Ring": "",
+        "Ring Type": "",
+        "Reserve Level": "",
+        "LS Distance": "",
+        "Material": "",
+        "Hotspot Count": "",
+    }
+
+
 def build_hotspot_rows(
     systems,
     bodies_by_system,
@@ -322,17 +365,12 @@ def build_hotspot_rows(
         key = norm(system)
 
         if key in unresolved_keys:
-            raw_rows.append({
-                "System": system,
-                "Status": "UNKNOWN_API_ERROR",
-                "Body": "",
-                "Ring": "",
-                "Ring Type": "",
-                "Reserve Level": "",
-                "LS Distance": "",
-                "Material": "",
-                "Hotspot Count": "",
-            })
+            raw_rows.append(
+                empty_hotspot_status(
+                    system,
+                    "UNKNOWN_API_ERROR",
+                )
+            )
             continue
 
         bodies = bodies_by_system.get(
@@ -341,17 +379,12 @@ def build_hotspot_rows(
         )
 
         if not bodies:
-            raw_rows.append({
-                "System": system,
-                "Status": "SYSTEM_NOT_FOUND",
-                "Body": "",
-                "Ring": "",
-                "Ring Type": "",
-                "Reserve Level": "",
-                "LS Distance": "",
-                "Material": "",
-                "Hotspot Count": "",
-            })
+            raw_rows.append(
+                empty_hotspot_status(
+                    system,
+                    "SYSTEM_NOT_FOUND",
+                )
+            )
             continue
 
         has_ring = False
@@ -391,10 +424,7 @@ def build_hotspot_rows(
                 )
 
                 signals = (
-                    ring.get(
-                        "signals",
-                        [],
-                    )
+                    ring.get("signals", [])
                     or []
                 )
 
@@ -416,10 +446,7 @@ def build_hotspot_rows(
 
                 for signal in signals:
                     material = str(
-                        signal.get(
-                            "name",
-                            "",
-                        )
+                        signal.get("name", "")
                         or ""
                     ).strip()
 
@@ -458,19 +485,114 @@ def build_hotspot_rows(
                     })
 
         if not has_ring:
-            raw_rows.append({
-                "System": system,
-                "Status": "NO_RINGS",
-                "Body": "",
-                "Ring": "",
-                "Ring Type": "",
-                "Reserve Level": "",
-                "LS Distance": "",
-                "Material": "",
-                "Hotspot Count": "",
-            })
+            raw_rows.append(
+                empty_hotspot_status(
+                    system,
+                    "NO_RINGS",
+                )
+            )
 
     return raw_rows
+
+
+def filter_hotspot_rows(
+    systems,
+    raw_rows,
+    ring_types,
+    materials,
+    only_pristine,
+):
+    selected_ring_types = {
+        norm_filter(name)
+        for name, enabled in ring_types.items()
+        if enabled
+    }
+
+    selected_materials = {
+        norm_filter(name)
+        for name, enabled in materials.items()
+        if enabled
+    }
+
+    system_level_statuses = {
+        "UNKNOWN_API_ERROR",
+        "SYSTEM_NOT_FOUND",
+        "NO_RINGS",
+    }
+
+    rows_by_system = {
+        norm(system): []
+        for system in systems
+    }
+
+    for row in raw_rows:
+        rows_by_system.setdefault(
+            norm(row["System"]),
+            [],
+        ).append(row)
+
+    filtered = []
+
+    for system in systems:
+        source_rows = rows_by_system.get(
+            norm(system),
+            [],
+        )
+
+        kept = []
+
+        for row in source_rows:
+            status = row["Status"]
+
+            if status in system_level_statuses:
+                kept.append(row)
+                continue
+
+            # Ring type filter.
+            if selected_ring_types:
+                if (
+                    norm_filter(
+                        row["Ring Type"]
+                    )
+                    not in selected_ring_types
+                ):
+                    continue
+
+            # Reserve filter.
+            if only_pristine:
+                if norm_filter(
+                    row["Reserve Level"]
+                ) != "pristine":
+                    continue
+
+            # Material filter:
+            # if one or more materials are selected, only actual
+            # HOTSPOT_FOUND rows matching those materials survive.
+            if selected_materials:
+                if status != "HOTSPOT_FOUND":
+                    continue
+
+                if (
+                    norm_filter(
+                        row["Material"]
+                    )
+                    not in selected_materials
+                ):
+                    continue
+
+            kept.append(row)
+
+        if kept:
+            filtered.extend(kept)
+        else:
+            filtered.append(
+                empty_hotspot_status(
+                    system,
+                    "NO_MATCHING_HOTSPOTS",
+                )
+            )
+
+    return filtered
 
 
 def clean_hotspot_rows(raw_rows):
@@ -532,6 +654,17 @@ PLANET_HEADERS = [
 ]
 
 
+def empty_planet_status(system, status):
+    return {
+        "System": system,
+        "Status": status,
+        "Body": "",
+        "Planet Type": "",
+        "Landable": "",
+        "LS Distance": "",
+    }
+
+
 def build_planet_rows(
     systems,
     bodies_by_system,
@@ -548,14 +681,12 @@ def build_planet_rows(
         key = norm(system)
 
         if key in unresolved_keys:
-            raw_rows.append({
-                "System": system,
-                "Status": "UNKNOWN_API_ERROR",
-                "Body": "",
-                "Planet Type": "",
-                "Landable": "",
-                "LS Distance": "",
-            })
+            raw_rows.append(
+                empty_planet_status(
+                    system,
+                    "UNKNOWN_API_ERROR",
+                )
+            )
             continue
 
         bodies = bodies_by_system.get(
@@ -564,14 +695,12 @@ def build_planet_rows(
         )
 
         if not bodies:
-            raw_rows.append({
-                "System": system,
-                "Status": "SYSTEM_NOT_FOUND",
-                "Body": "",
-                "Planet Type": "",
-                "Landable": "",
-                "LS Distance": "",
-            })
+            raw_rows.append(
+                empty_planet_status(
+                    system,
+                    "SYSTEM_NOT_FOUND",
+                )
+            )
             continue
 
         planets = []
@@ -600,17 +729,11 @@ def build_planet_rows(
                 "System": system,
                 "Status": "PLANET_FOUND",
                 "Body": str(
-                    body.get(
-                        "name",
-                        "",
-                    )
+                    body.get("name", "")
                     or ""
                 ).strip(),
                 "Planet Type": str(
-                    body.get(
-                        "subtype",
-                        "",
-                    )
+                    body.get("subtype", "")
                     or ""
                 ).strip(),
                 "Landable": landable,
@@ -623,18 +746,74 @@ def build_planet_rows(
 
         if planets:
             raw_rows.extend(planets)
-
         else:
-            raw_rows.append({
-                "System": system,
-                "Status": "NO_PLANETS",
-                "Body": "",
-                "Planet Type": "",
-                "Landable": "",
-                "LS Distance": "",
-            })
+            raw_rows.append(
+                empty_planet_status(
+                    system,
+                    "NO_PLANETS",
+                )
+            )
 
     return raw_rows
+
+
+def filter_planet_rows(
+    systems,
+    raw_rows,
+    only_landables,
+):
+    if not only_landables:
+        return raw_rows
+
+    system_level_statuses = {
+        "UNKNOWN_API_ERROR",
+        "SYSTEM_NOT_FOUND",
+        "NO_PLANETS",
+    }
+
+    rows_by_system = {
+        norm(system): []
+        for system in systems
+    }
+
+    for row in raw_rows:
+        rows_by_system.setdefault(
+            norm(row["System"]),
+            [],
+        ).append(row)
+
+    filtered = []
+
+    for system in systems:
+        source_rows = rows_by_system.get(
+            norm(system),
+            [],
+        )
+
+        kept = []
+
+        for row in source_rows:
+            if row["Status"] in system_level_statuses:
+                kept.append(row)
+                continue
+
+            if (
+                row["Status"] == "PLANET_FOUND"
+                and row["Landable"] == "Yes"
+            ):
+                kept.append(row)
+
+        if kept:
+            filtered.extend(kept)
+        else:
+            filtered.append(
+                empty_planet_status(
+                    system,
+                    "NO_LANDABLE_PLANETS",
+                )
+            )
+
+    return filtered
 
 
 def clean_planet_rows(raw_rows):
@@ -702,8 +881,7 @@ def build_sheet_values(
 
     if (
         hotspots_enabled
-        and
-        planets_enabled
+        and planets_enabled
     ):
         height = max(
             len(hotspot_block),
@@ -729,6 +907,7 @@ def build_sheet_values(
                 )
             )
 
+            # One empty separator column between blocks.
             result.append(
                 left + [""] + right
             )
@@ -786,10 +965,8 @@ def write_sheet(values):
         "POST",
         SHEET_URL,
         json={
-            "action":
-                "hotspots_write",
-            "values":
-                values,
+            "action": "hotspots_write",
+            "values": values,
         },
     )
 
@@ -811,18 +988,15 @@ def write_sheet(values):
 # ============================================================
 
 def build_summary(
-    systems,
-    hotspots_enabled,
-    planets_enabled,
-    hotspot_raw,
-    planet_raw,
+    config,
+    hotspot_rows,
+    planet_rows,
     unresolved,
 ):
     hotspot_records = [
         row
-        for row in hotspot_raw
-        if row["Status"]
-        == "HOTSPOT_FOUND"
+        for row in hotspot_rows
+        if row["Status"] == "HOTSPOT_FOUND"
     ]
 
     hotspot_total = sum(
@@ -835,34 +1009,59 @@ def build_summary(
 
     planets_found = [
         row
-        for row in planet_raw
-        if row["Status"]
-        == "PLANET_FOUND"
+        for row in planet_rows
+        if row["Status"] == "PLANET_FOUND"
+    ]
+
+    selected_ring_types = [
+        name
+        for name, enabled
+        in config["ring_types"].items()
+        if enabled
+    ]
+
+    selected_materials = [
+        name
+        for name, enabled
+        in config["materials"].items()
+        if enabled
     ]
 
     return {
         "systems_input":
-            len(systems),
+            len(config["systems"]),
 
         "hotspots_enabled":
-            hotspots_enabled,
+            config["hotspots_enabled"],
 
         "planets_enabled":
-            planets_enabled,
+            config["planets_enabled"],
 
-        "hotspot_material_records":
+        "ring_type_filters":
+            selected_ring_types,
+
+        "material_filters":
+            selected_materials,
+
+        "only_pristine":
+            config["only_pristine"],
+
+        "only_landables":
+            config["only_landables"],
+
+        "hotspot_material_records_after_filters":
             len(hotspot_records)
-            if hotspots_enabled
+            if config["hotspots_enabled"]
             else 0,
 
-        "hotspots_total_count":
+        "hotspots_total_count_after_filters":
             hotspot_total
-            if hotspots_enabled
+            if config["hotspots_enabled"]
             else 0,
 
-        "planets_found":
+        "planets_found_after_filters":
             len(planets_found)
-            if planets_enabled
+            if config["planets_enabled"]
             else 0,
 
         "unresolved_system_queries":
@@ -878,25 +1077,58 @@ def build_summary(
 # ============================================================
 
 def main():
-    (
-        systems,
-        hotspots_enabled,
-        planets_enabled,
-    ) = get_sheet_input()
+    config = get_sheet_input()
+
+    systems = config["systems"]
 
     print(
-        f"Systems loaded: "
-        f"{len(systems)}"
+        f"Systems loaded: {len(systems)}"
     )
 
     print(
         f"Hotspots: "
-        f"{hotspots_enabled}"
+        f"{config['hotspots_enabled']}"
     )
 
     print(
         f"Planets: "
-        f"{planets_enabled}"
+        f"{config['planets_enabled']}"
+    )
+
+    print(
+        "Ring type filters: "
+        + (
+            ", ".join(
+                name
+                for name, enabled
+                in config["ring_types"].items()
+                if enabled
+            )
+            or "ALL"
+        )
+    )
+
+    print(
+        "Material filters: "
+        + (
+            ", ".join(
+                name
+                for name, enabled
+                in config["materials"].items()
+                if enabled
+            )
+            or "ALL"
+        )
+    )
+
+    print(
+        f"Only pristine: "
+        f"{config['only_pristine']}"
+    )
+
+    print(
+        f"Only landables: "
+        f"{config['only_landables']}"
     )
 
     bodies_by_system, unresolved = (
@@ -905,24 +1137,32 @@ def main():
         )
     )
 
-    hotspot_raw = []
+    hotspot_filtered = []
     hotspot_clean = []
 
-    planet_raw = []
+    planet_filtered = []
     planet_clean = []
 
-    if hotspots_enabled:
-        hotspot_raw = (
-            build_hotspot_rows(
+    if config["hotspots_enabled"]:
+        hotspot_raw = build_hotspot_rows(
+            systems,
+            bodies_by_system,
+            unresolved,
+        )
+
+        hotspot_filtered = (
+            filter_hotspot_rows(
                 systems,
-                bodies_by_system,
-                unresolved,
+                hotspot_raw,
+                config["ring_types"],
+                config["materials"],
+                config["only_pristine"],
             )
         )
 
         hotspot_clean = (
             clean_hotspot_rows(
-                hotspot_raw
+                hotspot_filtered
             )
         )
 
@@ -932,18 +1172,24 @@ def main():
             hotspot_clean,
         )
 
-    if planets_enabled:
-        planet_raw = (
-            build_planet_rows(
+    if config["planets_enabled"]:
+        planet_raw = build_planet_rows(
+            systems,
+            bodies_by_system,
+            unresolved,
+        )
+
+        planet_filtered = (
+            filter_planet_rows(
                 systems,
-                bodies_by_system,
-                unresolved,
+                planet_raw,
+                config["only_landables"],
             )
         )
 
         planet_clean = (
             clean_planet_rows(
-                planet_raw
+                planet_filtered
             )
         )
 
@@ -953,13 +1199,11 @@ def main():
             planet_clean,
         )
 
-    sheet_values = (
-        build_sheet_values(
-            hotspots_enabled,
-            planets_enabled,
-            hotspot_clean,
-            planet_clean,
-        )
+    sheet_values = build_sheet_values(
+        config["hotspots_enabled"],
+        config["planets_enabled"],
+        hotspot_clean,
+        planet_clean,
     )
 
     write_matrix_csv(
@@ -968,11 +1212,9 @@ def main():
     )
 
     summary = build_summary(
-        systems,
-        hotspots_enabled,
-        planets_enabled,
-        hotspot_raw,
-        planet_raw,
+        config,
+        hotspot_filtered,
+        planet_filtered,
         unresolved,
     )
 
