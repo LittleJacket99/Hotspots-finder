@@ -713,7 +713,7 @@ def build_sheet_values(
             )
 
             result.append(
-                left + right
+                left + [""] + right
             )
 
         return result
