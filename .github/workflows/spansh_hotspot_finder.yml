@@ -23,14 +23,16 @@ jobs:
       - name: Query Spansh and update Google Sheet
         env:
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
-          SHEET_TOKEN: ${{ secrets.SHEET_TOKEN }}
         run: python spansh_hotspot_finder.py
 
       - name: Upload result files
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spansh-hotspot-results
+          name: spansh-finder-results
+          if-no-files-found: ignore
           path: |
             spansh_results.csv
-            spansh_results_raw.csv
+            spansh_hotspots.csv
+            spansh_planets.csv
             summary.json
